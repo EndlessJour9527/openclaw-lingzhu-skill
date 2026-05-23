@@ -12,6 +12,23 @@ openclaw plugins install ./extension
 openclaw plugins install --link ./extension
 ```
 
+## OpenClaw 2026.05.18 兼容性
+
+此版本已在 `openclaw.plugin.json` 中补齐新版插件发现所需的静态声明：
+
+- `activation.onStartup: true`，确保 Gateway 启动时加载桥接插件并注册 HTTP 路由。
+- `contracts.tools`，声明插件运行时通过 `api.registerTool(...)` 注册的设备工具所有权。
+- `activation.onConfigPaths`，当配置中出现 `plugins.entries.lingzhu` 时纳入启动加载计划。
+
+安装或升级后建议执行：
+
+```bash
+openclaw plugins install --link ./extension
+openclaw plugins doctor
+openclaw lingzhu doctor
+curl http://127.0.0.1:18789/metis/agent/api/health
+```
+
 ## 配置
 
 在 `openclaw.json` 或 `moltbot.json` 中加入：

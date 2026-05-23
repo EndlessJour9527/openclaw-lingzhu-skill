@@ -1,5 +1,27 @@
 {
   "id": "lingzhu",
+  "name": "Lingzhu Bridge",
+  "version": "1.0.0",
+  "description": "Bridge Lingzhu platform requests to OpenClaw chat completions and Rokid glasses device tools.",
+  "activation": {
+    "onStartup": true,
+    "onCapabilities": ["tool"],
+    "onConfigPaths": ["plugins.entries.lingzhu"]
+  },
+  "contracts": {
+    "tools": [
+      "take_photo",
+      "navigate",
+      "calendar",
+      "exit_agent",
+      "send_notification",
+      "send_toast",
+      "speak_tts",
+      "start_video_record",
+      "stop_video_record",
+      "open_custom_view"
+    ]
+  },
   "uiHints": {
     "enabled": {
       "label": "启用灵珠接入"
