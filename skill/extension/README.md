@@ -12,6 +12,15 @@ openclaw plugins install ./extension
 openclaw plugins install --link ./extension
 ```
 
+OpenClaw 2026.05.18 在安装插件包时要求 TypeScript 入口具备编译后的运行时 JS。首次安装或更新源码后，请先构建：
+
+```bash
+cd ./extension
+npm install --include=dev
+npm run build
+openclaw plugins install --link "$(pwd)"
+```
+
 ## OpenClaw 2026.05.18 兼容性
 
 此版本已在 `openclaw.plugin.json` 中补齐新版插件发现所需的静态声明：
@@ -23,7 +32,8 @@ openclaw plugins install --link ./extension
 安装或升级后建议执行：
 
 ```bash
-openclaw plugins install --link ./extension
+cd ./extension && npm run build
+openclaw plugins install --link "$(pwd)"
 openclaw plugins doctor
 openclaw lingzhu doctor
 curl http://127.0.0.1:18789/metis/agent/api/health
