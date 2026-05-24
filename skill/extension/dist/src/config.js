@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 const DEFAULT_CONFIG = {
     enabled: true,
     authAk: "",
+    gatewayToken: "",
     agentId: "main",
     includeMetadata: true,
     requestTimeoutMs: 60000,
@@ -37,6 +38,7 @@ export function resolveLingzhuConfig(raw) {
     return {
         enabled: cfg.enabled ?? DEFAULT_CONFIG.enabled,
         authAk: cfg.authAk ?? DEFAULT_CONFIG.authAk,
+        gatewayToken: typeof cfg.gatewayToken === "string" ? cfg.gatewayToken.trim() : DEFAULT_CONFIG.gatewayToken,
         agentId: cfg.agentId ?? DEFAULT_CONFIG.agentId,
         includeMetadata: cfg.includeMetadata ?? DEFAULT_CONFIG.includeMetadata,
         requestTimeoutMs: timeout,
@@ -75,6 +77,7 @@ export const lingzhuConfigSchema = {
     properties: {
         enabled: { type: "boolean" },
         authAk: { type: "string" },
+        gatewayToken: { type: "string" },
         agentId: { type: "string" },
         includeMetadata: { type: "boolean" },
         requestTimeoutMs: { type: "number", minimum: 5000, maximum: 300000 },
@@ -99,6 +102,11 @@ export const lingzhuConfigSchema = {
             label: "鉴权密钥 (AK)",
             sensitive: true,
             help: "灵珠平台调用时携带的 Bearer Token，留空则自动生成",
+        },
+        gatewayToken: {
+            label: "OpenClaw Gateway Token",
+            sensitive: true,
+            help: "插件调用 OpenClaw /v1/chat/completions 时携带的 Bearer Token；留空则尝试读取环境变量或全局配置",
         },
         agentId: {
             label: "智能体 ID",

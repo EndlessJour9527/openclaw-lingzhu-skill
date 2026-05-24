@@ -82,6 +82,25 @@ function buildSessionKey(config: LingzhuConfig, body: LingzhuRequest): string {
   }
 }
 
+function readEnv(name: string): string {
+  try {
+    return globalThis.process?.env?.[name]?.trim() || "";
+  } catch {
+    return "";
+  }
+}
+
+function resolveGatewayToken(config: LingzhuConfig, api: any): string {
+  if (config.gatewayToken) {
+    return config.gatewayToken;
+  }
+
+  return readEnv("OPENCLAW_GATEWAY_TOKEN")
+    || readEnv("GATEWAY_TOKEN")
+    || api.config?.gateway?.auth?.token
+    || "";
+}
+
 function verifyAuth(
   authHeader: string | string[] | undefined,
   expectedAk: string
@@ -672,7 +691,7 @@ export function createHttpHandler(api: any, getRuntimeState: () => LingzhuRuntim
       const sessionKey = buildSessionKey(config, body);
       const targetAgentId = config.agentId || body.agent_id || "main";
       const gatewayPort = api.config?.gateway?.port ?? state.gatewayPort ?? 18789;
-      const gatewayToken = api.config?.gateway?.auth?.token;
+      const gatewayToken = resolveGatewayToken(config, api);
 
       nativeToolListener = (eventData: any) => {
         logger.info(`[Lingzhu:NativeEvent] Received native_invoke event: ${JSON.stringify(eventData)}`);
@@ -830,6 +849,12 @@ export function createHttpHandler(api: any, getRuntimeState: () => LingzhuRuntim
 
               if (delta?.content) {
                 fullResponse += delta.content;
+
+                if (nativeToolInvoked) {
+                  logger.info("[Lingzhu] 已触发原生设备工具，跳过后续普通文本流");
+                  continue;
+                }
+
                 streamedAnswer = true;
                 const answerChunkData: LingzhuSSEData = {
                   role: "agent",

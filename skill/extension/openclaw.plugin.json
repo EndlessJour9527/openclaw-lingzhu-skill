@@ -31,6 +31,11 @@
       "sensitive": true,
       "help": "灵珠平台调用时携带的 Bearer Token，留空则自动生成"
     },
+    "gatewayToken": {
+      "label": "OpenClaw Gateway Token",
+      "sensitive": true,
+      "help": "插件调用 OpenClaw /v1/chat/completions 时携带的 Bearer Token；留空则尝试读取环境变量或全局配置"
+    },
     "agentId": {
       "label": "智能体 ID",
       "help": "使用的 OpenClaw 智能体 ID，默认 main"
@@ -97,6 +102,9 @@
         "default": true
       },
       "authAk": {
+        "type": "string"
+      },
+      "gatewayToken": {
         "type": "string"
       },
       "agentId": {

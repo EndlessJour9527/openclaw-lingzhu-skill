@@ -60,6 +60,7 @@ curl http://127.0.0.1:18789/metis/agent/api/health
         "enabled": true,
         "config": {
           "authAk": "",
+          "gatewayToken": "",
           "agentId": "main",
           "includeMetadata": true,
           "requestTimeoutMs": 60000,
@@ -80,6 +81,10 @@ curl http://127.0.0.1:18789/metis/agent/api/health
   }
 }
 ```
+
+`gatewayToken` 是插件调用 OpenClaw Gateway `/v1/chat/completions` 时使用的
+Bearer Token。Docker/1Panel 部署中推荐直接在插件配置里填写它；留空时插件会依次尝试
+`OPENCLAW_GATEWAY_TOKEN`、`GATEWAY_TOKEN` 和 `gateway.auth.token`。
 
 ## CLI
 

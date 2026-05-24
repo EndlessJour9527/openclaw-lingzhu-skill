@@ -49,6 +49,23 @@ function buildSessionKey(config, body) {
             return `agent:${targetAgentId}:${namespace}_${userId}`;
     }
 }
+function readEnv(name) {
+    try {
+        return globalThis.process?.env?.[name]?.trim() || "";
+    }
+    catch {
+        return "";
+    }
+}
+function resolveGatewayToken(config, api) {
+    if (config.gatewayToken) {
+        return config.gatewayToken;
+    }
+    return readEnv("OPENCLAW_GATEWAY_TOKEN")
+        || readEnv("GATEWAY_TOKEN")
+        || api.config?.gateway?.auth?.token
+        || "";
+}
 function verifyAuth(authHeader, expectedAk) {
     if (!expectedAk) {
         return true;
@@ -550,7 +567,7 @@ export function createHttpHandler(api, getRuntimeState) {
             const sessionKey = buildSessionKey(config, body);
             const targetAgentId = config.agentId || body.agent_id || "main";
             const gatewayPort = api.config?.gateway?.port ?? state.gatewayPort ?? 18789;
-            const gatewayToken = api.config?.gateway?.auth?.token;
+            const gatewayToken = resolveGatewayToken(config, api);
             nativeToolListener = (eventData) => {
                 logger.info(`[Lingzhu:NativeEvent] Received native_invoke event: ${JSON.stringify(eventData)}`);
                 logger.info(`[Lingzhu:NativeEvent] Current sessionKey=${sessionKey}, targetAgentId=${targetAgentId}`);
@@ -671,6 +688,10 @@ export function createHttpHandler(api, getRuntimeState) {
                             writeDebugLog(config, buildRequestLogName(body.message_id, "openclaw.chunk"), summarizeForDebug(chunk, includePayload));
                             if (delta?.content) {
                                 fullResponse += delta.content;
+                                if (nativeToolInvoked) {
+                                    logger.info("[Lingzhu] 已触发原生设备工具，跳过后续普通文本流");
+                                    continue;
+                                }
                                 streamedAnswer = true;
                                 const answerChunkData = {
                                     role: "agent",

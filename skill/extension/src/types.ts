@@ -4,6 +4,8 @@
 export interface LingzhuConfig {
   enabled?: boolean;
   authAk?: string;
+  /** 调用 OpenClaw Gateway /v1/chat/completions 时使用的 Bearer Token */
+  gatewayToken?: string;
   agentId?: string;
   /** 是否将设备信息（metadata）传递给 OpenClaw，默认 true */
   includeMetadata?: boolean;
