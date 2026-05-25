@@ -1,17 +1,32 @@
 import { promises as fs } from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const IMAGE_CACHE_DIR = path.resolve(__dirname, "../../.cache/img");
 const DEFAULT_MAX_AGE_HOURS = 24;
 const CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000;
 let lastCleanupAt = 0;
+function readEnv(name) {
+    try {
+        return globalThis.process?.env?.[name]?.trim() || "";
+    }
+    catch {
+        return "";
+    }
+}
+function resolveImageCacheDir() {
+    const configuredDir = readEnv("OPENCLAW_LINGZHU_IMAGE_CACHE_DIR");
+    if (configuredDir) {
+        return path.resolve(configuredDir);
+    }
+    const openclawHome = readEnv("OPENCLAW_HOME") || path.join(os.homedir(), ".openclaw");
+    return path.join(openclawHome, "lingzhu", "media", "img");
+}
 export function getImageCacheDir() {
-    return IMAGE_CACHE_DIR;
+    return resolveImageCacheDir();
 }
 export async function ensureImageCacheDir() {
-    await fs.mkdir(IMAGE_CACHE_DIR, { recursive: true });
-    return IMAGE_CACHE_DIR;
+    const cacheDir = getImageCacheDir();
+    await fs.mkdir(cacheDir, { recursive: true });
+    return cacheDir;
 }
 export async function cleanupImageCache(maxAgeHours = DEFAULT_MAX_AGE_HOURS) {
     const cacheDir = await ensureImageCacheDir();

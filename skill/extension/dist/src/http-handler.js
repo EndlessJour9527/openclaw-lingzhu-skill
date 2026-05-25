@@ -43,6 +43,9 @@ function extractUserText(messages) {
         .join(" ")
         .trim();
 }
+function hasIncomingImage(messages) {
+    return messages.some((message) => message.role === "user" && message.type === "image" && Boolean(message.image_url));
+}
 function isLocalDeviceActionCommand(command) {
     return command === "take_photo"
         || command === "take_navigation"
@@ -559,6 +562,7 @@ export function createHttpHandler(api, getRuntimeState) {
                     stopKeepalive();
                 }
             }, 7000);
+            const requestHasImage = hasIncomingImage(body.message);
             const localIntentText = extractUserText(body.message);
             const localToolCall = localIntentText
                 ? detectIntentFromText(localIntentText, {
@@ -566,7 +570,7 @@ export function createHttpHandler(api, getRuntimeState) {
                     enableExperimentalNativeActions: config.enableExperimentalNativeActions,
                 })
                 : null;
-            if (localToolCall && isLocalDeviceActionCommand(localToolCall.command)) {
+            if (!requestHasImage && localToolCall && isLocalDeviceActionCommand(localToolCall.command)) {
                 logger.info(`[Lingzhu] 本地短路设备动作: ${localToolCall.command}, message_id=${body.message_id}`);
                 const toolData = {
                     role: "agent",
@@ -605,6 +609,12 @@ export function createHttpHandler(api, getRuntimeState) {
                 enableExperimentalNativeActions: config.enableExperimentalNativeActions,
             });
             openaiMessages = await preprocessOpenAIMessages(openaiMessages, logger, maxImageBytes);
+            if (requestHasImage) {
+                openaiMessages.unshift({
+                    role: "system",
+                    content: "当前请求已经包含灵珠设备拍摄并回传的图片。必须直接分析这张图片并回答用户问题；严禁再次调用 take_photo、camera、photo 或任何拍照工具。",
+                });
+            }
             const hasUserMsg = openaiMessages.some((message) => message.role === "user");
             if (!hasUserMsg) {
                 const fallbackText = extractFallbackUserText(body.message) || "你好";
@@ -619,6 +629,10 @@ export function createHttpHandler(api, getRuntimeState) {
             nativeToolListener = (eventData) => {
                 logger.info(`[Lingzhu:NativeEvent] Received native_invoke event: ${JSON.stringify(eventData)}`);
                 logger.info(`[Lingzhu:NativeEvent] Current sessionKey=${sessionKey}, targetAgentId=${targetAgentId}`);
+                if (requestHasImage && eventData.tool_call?.command === "take_photo") {
+                    logger.warn("[Lingzhu:NativeEvent] 当前请求已包含图片，已忽略重复 take_photo 工具调用");
+                    return;
+                }
                 if (eventData.sessionKey && eventData.sessionKey !== sessionKey) {
                     logger.warn(`[Lingzhu:NativeEvent] Filtered out! Event sessionKey (${eventData.sessionKey}) != current (${sessionKey})`);
                     return;
@@ -790,7 +804,7 @@ export function createHttpHandler(api, getRuntimeState) {
                     safeWrite(sseFormatted);
                 }
             }
-            if (!hasToolCall && fullResponse) {
+            if (!requestHasImage && !hasToolCall && fullResponse) {
                 const detectedIntent = detectIntentFromText(fullResponse, {
                     defaultNavigationMode: config.defaultNavigationMode,
                     enableExperimentalNativeActions: config.enableExperimentalNativeActions,
