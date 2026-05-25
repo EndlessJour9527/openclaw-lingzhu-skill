@@ -35,6 +35,20 @@ function extractFallbackUserText(messages) {
         .join(" ")
         .trim();
 }
+function extractUserText(messages) {
+    return messages
+        .filter((message) => message.role === "user" && message.type === "text")
+        .map((message) => message.text || message.content || "")
+        .filter(Boolean)
+        .join(" ")
+        .trim();
+}
+function isLocalDeviceActionCommand(command) {
+    return command === "take_photo"
+        || command === "take_navigation"
+        || command === "notify_agent_off"
+        || command === "control_calendar";
+}
 function buildSessionKey(config, body) {
     const namespace = config.sessionNamespace || "lingzhu";
     const targetAgentId = config.agentId || body.agent_id || "main";
@@ -545,6 +559,40 @@ export function createHttpHandler(api, getRuntimeState) {
                     stopKeepalive();
                 }
             }, 7000);
+            const localIntentText = extractUserText(body.message);
+            const localToolCall = localIntentText
+                ? detectIntentFromText(localIntentText, {
+                    defaultNavigationMode: config.defaultNavigationMode,
+                    enableExperimentalNativeActions: config.enableExperimentalNativeActions,
+                })
+                : null;
+            if (localToolCall && isLocalDeviceActionCommand(localToolCall.command)) {
+                logger.info(`[Lingzhu] 本地短路设备动作: ${localToolCall.command}, message_id=${body.message_id}`);
+                const toolData = {
+                    role: "agent",
+                    type: "tool_call",
+                    message_id: body.message_id,
+                    agent_id: body.agent_id,
+                    is_finish: false,
+                    tool_call: localToolCall,
+                };
+                writeDebugLog(config, buildRequestLogName(body.message_id, "response.local_tool_call"), summarizeForDebug(toolData, includePayload));
+                safeWrite(formatLingzhuSSE("message", toolData));
+                const finalFinishData = {
+                    role: "agent",
+                    type: "answer",
+                    answer_stream: "",
+                    message_id: body.message_id,
+                    agent_id: body.agent_id,
+                    is_finish: true,
+                };
+                writeDebugLog(config, buildRequestLogName(body.message_id, "response.local_tool_done"), summarizeForDebug(finalFinishData, includePayload));
+                safeWrite(formatLingzhuSSE("message", finalFinishData));
+                stopKeepalive();
+                res.end();
+                logger.info(`[Lingzhu] 本地设备动作已完成: message_id=${body.message_id}`);
+                return true;
+            }
             const includeMetadata = config.includeMetadata !== false;
             const maxImageBytes = resolveMaxImageBytes(config);
             void cleanupImageCacheIfNeeded().catch((error) => {
