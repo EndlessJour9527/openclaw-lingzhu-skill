@@ -22,7 +22,7 @@ function resolveImageCacheDir(): string {
   }
 
   const openclawHome = readEnv("OPENCLAW_HOME") || path.join(os.homedir(), ".openclaw");
-  return path.join(openclawHome, "lingzhu", "media", "img");
+  return path.join(openclawHome, "media", "lingzhu", "img");
 }
 
 export function getImageCacheDir(): string {
