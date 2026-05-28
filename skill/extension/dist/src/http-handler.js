@@ -14,7 +14,10 @@ import { lingzhuEventBus } from "./events.js";
 const REMOTE_IMAGE_PROTOCOLS = new Set(["http:", "https:"]);
 const REMOTE_IMAGE_TIMEOUT_MS = 15000;
 const PENDING_PHOTO_PROMPT_TTL_MS = 5 * 60 * 1000;
+const PHOTO_TRANSACTION_DEDUPE_MS = 8 * 1000;
 const pendingPhotoPrompts = new Map();
+const photoTransactionsByMessageId = new Map();
+const recentPhotoTransactionsByOwner = new Map();
 function resolveMaxImageBytes(config) {
     if (typeof config.maxImageBytes === "number" && Number.isFinite(config.maxImageBytes)) {
         return Math.max(256 * 1024, Math.min(20 * 1024 * 1024, Math.trunc(config.maxImageBytes)));
@@ -53,6 +56,41 @@ function isLocalDeviceActionCommand(command) {
         || command === "take_navigation"
         || command === "notify_agent_off"
         || command === "control_calendar";
+}
+function detectLocalPhotoIntent(text) {
+    const normalized = text.trim().toLowerCase();
+    if (!normalized) {
+        return null;
+    }
+    const photoKeywords = [
+        "take_photo",
+        "拍照",
+        "照相",
+        "拍一张",
+        "当前画面",
+        "当前场景",
+        "开始巡检",
+        "现场巡检",
+        "工业巡检",
+        "安全隐患",
+        "隐患",
+        "现场风险",
+        "识别风险",
+        "故障诊断",
+        "设备异常",
+        "帮我看看",
+        "换个角度",
+        "重新拍",
+        "再检查",
+    ];
+    if (!photoKeywords.some((keyword) => normalized.includes(keyword))) {
+        return null;
+    }
+    return {
+        handling_required: true,
+        command: "take_photo",
+        is_recall: true,
+    };
 }
 function buildSessionKey(config, body) {
     const namespace = config.sessionNamespace || "lingzhu";
@@ -170,6 +208,60 @@ function consumePendingPhotoPrompt(body) {
     }
     pendingPhotoPrompts.delete(body.message_id);
     return Date.now() - pending.createdAt <= PENDING_PHOTO_PROMPT_TTL_MS ? pending.text : "";
+}
+function buildPhotoOwnerKey(body) {
+    return `${body.agent_id || "main"}:${body.user_id || body.agent_id || "anonymous"}`;
+}
+function cleanupPhotoTransactions(now = Date.now()) {
+    for (const [messageId, transaction] of photoTransactionsByMessageId) {
+        if (now - transaction.createdAt > PHOTO_TRANSACTION_DEDUPE_MS) {
+            photoTransactionsByMessageId.delete(messageId);
+        }
+    }
+    for (const [ownerKey, transaction] of recentPhotoTransactionsByOwner) {
+        if (now - transaction.createdAt > PHOTO_TRANSACTION_DEDUPE_MS) {
+            recentPhotoTransactionsByOwner.delete(ownerKey);
+        }
+    }
+}
+function isBarePhotoEcho(text) {
+    const normalized = text.trim().toLowerCase();
+    if (!normalized) {
+        return false;
+    }
+    return /^(take_photo|photo|camera|拍照|照相|现在开始拍照|开始拍照|调用拍照|调用摄像头)[。.!！\s]*$/i.test(normalized);
+}
+function shouldSuppressDuplicatePhoto(body, text) {
+    const now = Date.now();
+    cleanupPhotoTransactions(now);
+    if (photoTransactionsByMessageId.has(body.message_id)) {
+        return true;
+    }
+    const ownerKey = buildPhotoOwnerKey(body);
+    const recent = recentPhotoTransactionsByOwner.get(ownerKey);
+    return Boolean(recent && recent.messageId !== body.message_id && isBarePhotoEcho(text));
+}
+function markPhotoRequested(body, text) {
+    const now = Date.now();
+    cleanupPhotoTransactions(now);
+    const ownerKey = buildPhotoOwnerKey(body);
+    photoTransactionsByMessageId.set(body.message_id, { ownerKey, createdAt: now });
+    recentPhotoTransactionsByOwner.set(ownerKey, {
+        messageId: body.message_id,
+        text: text.trim(),
+        createdAt: now,
+    });
+}
+function releasePhotoTransaction(body) {
+    const transaction = photoTransactionsByMessageId.get(body.message_id);
+    if (transaction) {
+        const recent = recentPhotoTransactionsByOwner.get(transaction.ownerKey);
+        if (recent?.messageId === body.message_id) {
+            recentPhotoTransactionsByOwner.delete(transaction.ownerKey);
+        }
+    }
+    photoTransactionsByMessageId.delete(body.message_id);
+    cleanupPhotoTransactions();
 }
 function readEnv(name) {
     try {
@@ -709,12 +801,29 @@ export function createHttpHandler(api, getRuntimeState) {
                 ? detectIntentFromText(localIntentText, {
                     defaultNavigationMode: config.defaultNavigationMode,
                     enableExperimentalNativeActions: config.enableExperimentalNativeActions,
-                })
+                }) || detectLocalPhotoIntent(localIntentText)
                 : null;
             if (!requestHasImage && localToolCall && isLocalDeviceActionCommand(localToolCall.command)) {
                 logger.info(`[Lingzhu] 本地短路设备动作: ${localToolCall.command}, message_id=${body.message_id}`);
                 if (localToolCall.command === "take_photo") {
+                    if (shouldSuppressDuplicatePhoto(body, localIntentText)) {
+                        logger.warn(`[Lingzhu] 已忽略重复拍照触发: message_id=${body.message_id}`);
+                        const finalFinishData = {
+                            role: "agent",
+                            type: "answer",
+                            answer_stream: "",
+                            message_id: body.message_id,
+                            agent_id: body.agent_id,
+                            is_finish: true,
+                        };
+                        writeDebugLog(config, buildRequestLogName(body.message_id, "response.duplicate_photo_done"), summarizeForDebug(finalFinishData, includePayload));
+                        safeWrite(formatLingzhuSSE("message", finalFinishData));
+                        stopKeepalive();
+                        res.end();
+                        return true;
+                    }
                     rememberPendingPhotoPrompt(body, localIntentText);
+                    markPhotoRequested(body, localIntentText);
                 }
                 const toolData = {
                     role: "agent",
@@ -755,6 +864,7 @@ export function createHttpHandler(api, getRuntimeState) {
             openaiMessages = await preprocessOpenAIMessages(openaiMessages, logger, maxImageBytes);
             if (requestHasImage) {
                 const visionOriginalText = extractFallbackUserText(body.message) || consumePendingPhotoPrompt(body);
+                releasePhotoTransaction(body);
                 const visionPreset = detectVisionPromptPreset(visionOriginalText, config);
                 openaiMessages.unshift({
                     role: "system",
