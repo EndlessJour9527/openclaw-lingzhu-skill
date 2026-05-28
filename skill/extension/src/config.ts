@@ -9,6 +9,7 @@ const DEFAULT_CONFIG: Required<LingzhuConfig> = {
   includeMetadata: true,
   requestTimeoutMs: 60000,
   systemPrompt: "",
+  visionPromptPreset: "auto",
   defaultNavigationMode: "0",
   enableFollowUp: true,
   followUpMaxCount: 3,
@@ -39,6 +40,13 @@ export function resolveLingzhuConfig(raw: unknown): LingzhuConfig {
   const sessionMode = cfg.sessionMode === "shared_agent" || cfg.sessionMode === "per_message"
     ? cfg.sessionMode
     : DEFAULT_CONFIG.sessionMode;
+  const visionPromptPreset =
+    cfg.visionPromptPreset === "industrial_inspection"
+      || cfg.visionPromptPreset === "fault_diagnosis"
+      || cfg.visionPromptPreset === "general_visual_qa"
+      || cfg.visionPromptPreset === "auto"
+      ? cfg.visionPromptPreset
+      : DEFAULT_CONFIG.visionPromptPreset;
 
   return {
     enabled: cfg.enabled ?? DEFAULT_CONFIG.enabled,
@@ -48,6 +56,7 @@ export function resolveLingzhuConfig(raw: unknown): LingzhuConfig {
     includeMetadata: cfg.includeMetadata ?? DEFAULT_CONFIG.includeMetadata,
     requestTimeoutMs: timeout,
     systemPrompt: typeof cfg.systemPrompt === "string" ? cfg.systemPrompt.trim() : DEFAULT_CONFIG.systemPrompt,
+    visionPromptPreset,
     defaultNavigationMode,
     enableFollowUp: cfg.enableFollowUp ?? DEFAULT_CONFIG.enableFollowUp,
     followUpMaxCount,
@@ -93,6 +102,10 @@ export const lingzhuConfigSchema = {
     includeMetadata: { type: "boolean" as const },
     requestTimeoutMs: { type: "number" as const, minimum: 5000, maximum: 300000 },
     systemPrompt: { type: "string" as const },
+    visionPromptPreset: {
+      type: "string" as const,
+      enum: ["auto", "industrial_inspection", "fault_diagnosis", "general_visual_qa"],
+    },
     defaultNavigationMode: { type: "string" as const, enum: ["0", "1", "2"] },
     enableFollowUp: { type: "boolean" as const },
     followUpMaxCount: { type: "number" as const, minimum: 0, maximum: 8 },
@@ -134,6 +147,10 @@ export const lingzhuConfigSchema = {
     systemPrompt: {
       label: "自定义系统提示词",
       help: "可补充业务约束，帮助模型更稳定地选择拍照、导航、日程或退出工具",
+    },
+    visionPromptPreset: {
+      label: "视觉分析场景",
+      help: "auto=按用户问题自动判断；industrial_inspection=工业巡检；fault_diagnosis=设备故障诊断；general_visual_qa=通用视觉问答",
     },
     defaultNavigationMode: {
       label: "默认导航方式",

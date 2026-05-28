@@ -67,6 +67,7 @@ curl http://127.0.0.1:18789/metis/agent/api/health
           "sessionMode": "per_user",
           "sessionNamespace": "lingzhu",
           "defaultNavigationMode": "0",
+          "visionPromptPreset": "auto",
           "enableFollowUp": true,
           "followUpMaxCount": 3,
           "maxImageBytes": 5242880,
@@ -85,6 +86,13 @@ curl http://127.0.0.1:18789/metis/agent/api/health
 `gatewayToken` 是插件调用 OpenClaw Gateway `/v1/chat/completions` 时使用的
 Bearer Token。Docker/1Panel 部署中推荐直接在插件配置里填写它；留空时插件会依次尝试
 `OPENCLAW_GATEWAY_TOKEN`、`GATEWAY_TOKEN` 和 `gateway.auth.token`。
+
+`visionPromptPreset` 控制眼镜拍照回传后的视觉分析场景：
+
+- `auto`：根据用户语音自动判断工业巡检、故障诊断或通用视觉问答。
+- `industrial_inspection`：固定输出安全隐患、风险等级、整改建议等巡检报告结构。
+- `fault_diagnosis`：固定输出可见异常、可能原因、影响范围、排查步骤、停机/报修建议。
+- `general_visual_qa`：通用图片问答。
 
 ## CLI
 

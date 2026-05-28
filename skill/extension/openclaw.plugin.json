@@ -52,6 +52,10 @@
       "label": "自定义系统提示词",
       "help": "用于补充业务约束，帮助模型更稳定地选择设备工具"
     },
+    "visionPromptPreset": {
+      "label": "视觉分析场景",
+      "help": "auto=自动判断；industrial_inspection=工业巡检；fault_diagnosis=设备故障诊断；general_visual_qa=通用视觉问答"
+    },
     "defaultNavigationMode": {
       "label": "默认导航方式",
       "help": "0=驾车，1=步行，2=骑行"
@@ -123,6 +127,11 @@
       },
       "systemPrompt": {
         "type": "string"
+      },
+      "visionPromptPreset": {
+        "type": "string",
+        "enum": ["auto", "industrial_inspection", "fault_diagnosis", "general_visual_qa"],
+        "default": "auto"
       },
       "defaultNavigationMode": {
         "type": "string",
