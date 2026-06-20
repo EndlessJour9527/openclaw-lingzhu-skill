@@ -4,10 +4,12 @@ import type { LingzhuConfig } from "./types.js";
 const DEFAULT_CONFIG: Required<LingzhuConfig> = {
   enabled: true,
   authAk: "",
+  gatewayToken: "",
   agentId: "main",
   includeMetadata: true,
   requestTimeoutMs: 60000,
   systemPrompt: "",
+  visionPromptPreset: "auto",
   defaultNavigationMode: "0",
   enableFollowUp: true,
   followUpMaxCount: 3,
@@ -38,14 +40,23 @@ export function resolveLingzhuConfig(raw: unknown): LingzhuConfig {
   const sessionMode = cfg.sessionMode === "shared_agent" || cfg.sessionMode === "per_message"
     ? cfg.sessionMode
     : DEFAULT_CONFIG.sessionMode;
+  const visionPromptPreset =
+    cfg.visionPromptPreset === "industrial_inspection"
+      || cfg.visionPromptPreset === "fault_diagnosis"
+      || cfg.visionPromptPreset === "general_visual_qa"
+      || cfg.visionPromptPreset === "auto"
+      ? cfg.visionPromptPreset
+      : DEFAULT_CONFIG.visionPromptPreset;
 
   return {
     enabled: cfg.enabled ?? DEFAULT_CONFIG.enabled,
     authAk: cfg.authAk ?? DEFAULT_CONFIG.authAk,
+    gatewayToken: typeof cfg.gatewayToken === "string" ? cfg.gatewayToken.trim() : DEFAULT_CONFIG.gatewayToken,
     agentId: cfg.agentId ?? DEFAULT_CONFIG.agentId,
     includeMetadata: cfg.includeMetadata ?? DEFAULT_CONFIG.includeMetadata,
     requestTimeoutMs: timeout,
     systemPrompt: typeof cfg.systemPrompt === "string" ? cfg.systemPrompt.trim() : DEFAULT_CONFIG.systemPrompt,
+    visionPromptPreset,
     defaultNavigationMode,
     enableFollowUp: cfg.enableFollowUp ?? DEFAULT_CONFIG.enableFollowUp,
     followUpMaxCount,
@@ -86,10 +97,15 @@ export const lingzhuConfigSchema = {
   properties: {
     enabled: { type: "boolean" as const },
     authAk: { type: "string" as const },
+    gatewayToken: { type: "string" as const },
     agentId: { type: "string" as const },
     includeMetadata: { type: "boolean" as const },
     requestTimeoutMs: { type: "number" as const, minimum: 5000, maximum: 300000 },
     systemPrompt: { type: "string" as const },
+    visionPromptPreset: {
+      type: "string" as const,
+      enum: ["auto", "industrial_inspection", "fault_diagnosis", "general_visual_qa"],
+    },
     defaultNavigationMode: { type: "string" as const, enum: ["0", "1", "2"] },
     enableFollowUp: { type: "boolean" as const },
     followUpMaxCount: { type: "number" as const, minimum: 0, maximum: 8 },
@@ -111,6 +127,11 @@ export const lingzhuConfigSchema = {
       sensitive: true,
       help: "灵珠平台调用时携带的 Bearer Token，留空则自动生成",
     },
+    gatewayToken: {
+      label: "OpenClaw Gateway Token",
+      sensitive: true,
+      help: "插件调用 OpenClaw /v1/chat/completions 时携带的 Bearer Token；留空则尝试读取环境变量或全局配置",
+    },
     agentId: {
       label: "智能体 ID",
       help: "使用的 OpenClaw 智能体 ID，默认 main",
@@ -126,6 +147,10 @@ export const lingzhuConfigSchema = {
     systemPrompt: {
       label: "自定义系统提示词",
       help: "可补充业务约束，帮助模型更稳定地选择拍照、导航、日程或退出工具",
+    },
+    visionPromptPreset: {
+      label: "视觉分析场景",
+      help: "auto=按用户问题自动判断；industrial_inspection=工业巡检；fault_diagnosis=设备故障诊断；general_visual_qa=通用视觉问答",
     },
     defaultNavigationMode: {
       label: "默认导航方式",

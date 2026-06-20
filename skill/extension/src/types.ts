@@ -4,6 +4,8 @@
 export interface LingzhuConfig {
   enabled?: boolean;
   authAk?: string;
+  /** 调用 OpenClaw Gateway /v1/chat/completions 时使用的 Bearer Token */
+  gatewayToken?: string;
   agentId?: string;
   /** 是否将设备信息（metadata）传递给 OpenClaw，默认 true */
   includeMetadata?: boolean;
@@ -11,6 +13,8 @@ export interface LingzhuConfig {
   requestTimeoutMs?: number;
   /** 自定义 system prompt，用于增强模型对设备工具的调用约束 */
   systemPrompt?: string;
+  /** 图片回传后的视觉分析预设：auto=按问题自动判断，industrial_inspection=工业巡检，fault_diagnosis=故障诊断，general_visual_qa=通用视觉问答 */
+  visionPromptPreset?: "auto" | "industrial_inspection" | "fault_diagnosis" | "general_visual_qa";
   /** 默认导航方式：0=驾车，1=步行，2=骑行 */
   defaultNavigationMode?: "0" | "1" | "2";
   /** 是否启用 follow_up 建议，默认 true */

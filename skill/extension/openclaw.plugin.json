@@ -1,5 +1,27 @@
 {
   "id": "lingzhu",
+  "name": "Lingzhu Bridge",
+  "version": "1.0.0",
+  "description": "Bridge Lingzhu platform requests to OpenClaw chat completions and Rokid glasses device tools.",
+  "activation": {
+    "onStartup": true,
+    "onCapabilities": ["tool"],
+    "onConfigPaths": ["plugins.entries.lingzhu"]
+  },
+  "contracts": {
+    "tools": [
+      "take_photo",
+      "navigate",
+      "calendar",
+      "exit_agent",
+      "send_notification",
+      "send_toast",
+      "speak_tts",
+      "start_video_record",
+      "stop_video_record",
+      "open_custom_view"
+    ]
+  },
   "uiHints": {
     "enabled": {
       "label": "启用灵珠接入"
@@ -8,6 +30,11 @@
       "label": "鉴权密钥 (AK)",
       "sensitive": true,
       "help": "灵珠平台调用时携带的 Bearer Token，留空则自动生成"
+    },
+    "gatewayToken": {
+      "label": "OpenClaw Gateway Token",
+      "sensitive": true,
+      "help": "插件调用 OpenClaw /v1/chat/completions 时携带的 Bearer Token；留空则尝试读取环境变量或全局配置"
     },
     "agentId": {
       "label": "智能体 ID",
@@ -24,6 +51,10 @@
     "systemPrompt": {
       "label": "自定义系统提示词",
       "help": "用于补充业务约束，帮助模型更稳定地选择设备工具"
+    },
+    "visionPromptPreset": {
+      "label": "视觉分析场景",
+      "help": "auto=自动判断；industrial_inspection=工业巡检；fault_diagnosis=设备故障诊断；general_visual_qa=通用视觉问答"
     },
     "defaultNavigationMode": {
       "label": "默认导航方式",
@@ -77,6 +108,9 @@
       "authAk": {
         "type": "string"
       },
+      "gatewayToken": {
+        "type": "string"
+      },
       "agentId": {
         "type": "string",
         "default": "main"
@@ -93,6 +127,11 @@
       },
       "systemPrompt": {
         "type": "string"
+      },
+      "visionPromptPreset": {
+        "type": "string",
+        "enum": ["auto", "industrial_inspection", "fault_diagnosis", "general_visual_qa"],
+        "default": "auto"
       },
       "defaultNavigationMode": {
         "type": "string",

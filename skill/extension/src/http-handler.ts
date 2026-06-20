@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { LingzhuConfig, LingzhuContext, LingzhuRequest, LingzhuSSEData } from "./types.js";
+import type { LingzhuConfig, LingzhuContext, LingzhuRequest, LingzhuSSEData, LingzhuToolCall } from "./types.js";
 import crypto from "node:crypto";
 import dns from "node:dns/promises";
 import http from "node:http";
@@ -35,8 +35,20 @@ interface ValidatedRemoteImageUrl {
   family: number;
 }
 
+type OpenAIContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
+type OpenAIContent = string | OpenAIContentPart[];
+
 const REMOTE_IMAGE_PROTOCOLS = new Set(["http:", "https:"]);
 const REMOTE_IMAGE_TIMEOUT_MS = 15000;
+const PENDING_PHOTO_PROMPT_TTL_MS = 5 * 60 * 1000;
+const PHOTO_TRANSACTION_DEDUPE_MS = 8 * 1000;
+
+const pendingPhotoPrompts = new Map<string, { text: string; createdAt: number }>();
+const photoTransactionsByMessageId = new Map<string, { ownerKey: string; createdAt: number }>();
+const recentPhotoTransactionsByOwner = new Map<string, { messageId: string; text: string; createdAt: number }>();
 
 function resolveMaxImageBytes(config: LingzhuConfig): number {
   if (typeof config.maxImageBytes === "number" && Number.isFinite(config.maxImageBytes)) {
@@ -66,6 +78,65 @@ function extractFallbackUserText(messages: LingzhuRequest["message"]): string {
     .trim();
 }
 
+function extractUserText(messages: LingzhuRequest["message"]): string {
+  return messages
+    .filter((message) => message.role === "user" && message.type === "text")
+    .map((message) => message.text || message.content || "")
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+}
+
+function hasIncomingImage(messages: LingzhuRequest["message"]): boolean {
+  return messages.some((message) => message.role === "user" && message.type === "image" && Boolean(message.image_url));
+}
+
+function isLocalDeviceActionCommand(command: LingzhuToolCall["command"]): boolean {
+  return command === "take_photo"
+    || command === "take_navigation"
+    || command === "notify_agent_off"
+    || command === "control_calendar";
+}
+
+function detectLocalPhotoIntent(text: string): LingzhuToolCall | null {
+  const normalized = text.trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+
+  const photoKeywords = [
+    "take_photo",
+    "拍照",
+    "照相",
+    "拍一张",
+    "当前画面",
+    "当前场景",
+    "开始巡检",
+    "现场巡检",
+    "工业巡检",
+    "安全隐患",
+    "隐患",
+    "现场风险",
+    "识别风险",
+    "故障诊断",
+    "设备异常",
+    "帮我看看",
+    "换个角度",
+    "重新拍",
+    "再检查",
+  ];
+
+  if (!photoKeywords.some((keyword) => normalized.includes(keyword))) {
+    return null;
+  }
+
+  return {
+    handling_required: true,
+    command: "take_photo",
+    is_recall: true,
+  };
+}
+
 function buildSessionKey(config: LingzhuConfig, body: LingzhuRequest): string {
   const namespace = config.sessionNamespace || "lingzhu";
   const targetAgentId = config.agentId || body.agent_id || "main";
@@ -80,6 +151,221 @@ function buildSessionKey(config: LingzhuConfig, body: LingzhuRequest): string {
     default:
       return `agent:${targetAgentId}:${namespace}_${userId}`;
   }
+}
+
+function sanitizeSessionSegment(value: string): string {
+  return value.replace(/[^a-zA-Z0-9_.:-]+/g, "_").slice(0, 96) || "anonymous";
+}
+
+function buildVisionSessionKey(config: LingzhuConfig, body: LingzhuRequest): string {
+  const namespace = config.sessionNamespace || "lingzhu";
+  const targetAgentId = config.agentId || body.agent_id || "main";
+  const userId = sanitizeSessionSegment(body.user_id || body.agent_id || "anonymous");
+  const messageId = sanitizeSessionSegment(body.message_id || `${Date.now()}`);
+  return `agent:${targetAgentId}:${namespace}_vision_${userId}_${messageId}`;
+}
+
+function detectVisionPromptPreset(
+  text: string,
+  config: LingzhuConfig
+): NonNullable<LingzhuConfig["visionPromptPreset"]> {
+  const configured = config.visionPromptPreset || "auto";
+  if (configured !== "auto") {
+    return configured;
+  }
+
+  const normalized = text.toLowerCase();
+  const diagnosisKeywords = [
+    "故障",
+    "异常",
+    "报警",
+    "报错",
+    "停机",
+    "泄漏",
+    "振动",
+    "异响",
+    "仪表",
+    "读数",
+    "电机",
+    "阀门",
+    "管路",
+    "设备",
+    "diagnosis",
+    "fault",
+    "alarm",
+  ];
+  const inspectionKeywords = [
+    "安全隐患",
+    "巡检",
+    "风险",
+    "消防",
+    "电气安全",
+    "通道",
+    "警示",
+    "防护",
+    "整改",
+    "inspection",
+    "hazard",
+    "safety",
+  ];
+
+  const diagnosisHit = diagnosisKeywords.some((keyword) => normalized.includes(keyword));
+  const inspectionHit = inspectionKeywords.some((keyword) => normalized.includes(keyword));
+  const strongDiagnosisHit = ["故障", "异常", "报警", "报错", "停机", "泄漏", "振动", "异响", "diagnosis", "fault", "alarm"]
+    .some((keyword) => normalized.includes(keyword));
+
+  if (diagnosisHit && (!inspectionHit || strongDiagnosisHit)) {
+    return "fault_diagnosis";
+  }
+  if (inspectionHit) {
+    return "industrial_inspection";
+  }
+
+  return "general_visual_qa";
+}
+
+function buildVisionSystemPrompt(
+  preset: NonNullable<LingzhuConfig["visionPromptPreset"]>,
+  originalText: string
+): string {
+  const base = [
+    "当前请求已经包含灵珠/乐奇眼镜拍摄并回传的图片。",
+    "必须直接基于已随消息内联传入的图片回答用户问题。",
+    "严禁再次调用 take_photo、camera、photo、photos_latest、image、file_fetch、nodes 或任何读取本地路径的工具。",
+    "不要要求用户重新上传图片；不要输出本地文件路径。",
+    originalText ? `用户原始问题：${originalText}` : "",
+  ].filter(Boolean);
+
+  if (preset === "industrial_inspection") {
+    base.push(
+      "请按工业巡检报告风格输出：1. 现场概况；2. 安全隐患清单；3. 风险等级（高/中/低）；4. 整改建议；5. 需要复核的点。",
+      "如果图片中证据不足，要明确说明“不确定”，但仍给出可执行的现场复核建议。"
+    );
+  } else if (preset === "fault_diagnosis") {
+    base.push(
+      "请按设备故障诊断风格输出：1. 可见异常；2. 可能原因；3. 影响范围；4. 排查步骤；5. 是否建议停机/隔离/报修。",
+      "不要把普通安全巡检建议替代为故障结论；缺少证据时给出排查优先级。"
+    );
+  } else {
+    base.push(
+      "请用简洁、可执行的方式回答图片相关问题；如果用户在现场操作，优先给出下一步动作。"
+    );
+  }
+
+  return base.join("\n");
+}
+
+function rememberPendingPhotoPrompt(body: LingzhuRequest, text: string): void {
+  if (!body.message_id || !text.trim()) {
+    return;
+  }
+
+  const now = Date.now();
+  for (const [key, value] of pendingPhotoPrompts) {
+    if (now - value.createdAt > PENDING_PHOTO_PROMPT_TTL_MS) {
+      pendingPhotoPrompts.delete(key);
+    }
+  }
+
+  pendingPhotoPrompts.set(body.message_id, {
+    text: text.trim(),
+    createdAt: now,
+  });
+}
+
+function consumePendingPhotoPrompt(body: LingzhuRequest): string {
+  const pending = pendingPhotoPrompts.get(body.message_id);
+  if (!pending) {
+    return "";
+  }
+
+  pendingPhotoPrompts.delete(body.message_id);
+  return Date.now() - pending.createdAt <= PENDING_PHOTO_PROMPT_TTL_MS ? pending.text : "";
+}
+
+function buildPhotoOwnerKey(body: LingzhuRequest): string {
+  return `${body.agent_id || "main"}:${body.user_id || body.agent_id || "anonymous"}`;
+}
+
+function cleanupPhotoTransactions(now = Date.now()): void {
+  for (const [messageId, transaction] of photoTransactionsByMessageId) {
+    if (now - transaction.createdAt > PHOTO_TRANSACTION_DEDUPE_MS) {
+      photoTransactionsByMessageId.delete(messageId);
+    }
+  }
+
+  for (const [ownerKey, transaction] of recentPhotoTransactionsByOwner) {
+    if (now - transaction.createdAt > PHOTO_TRANSACTION_DEDUPE_MS) {
+      recentPhotoTransactionsByOwner.delete(ownerKey);
+    }
+  }
+}
+
+function isBarePhotoEcho(text: string): boolean {
+  const normalized = text.trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  return /^(take_photo|photo|camera|拍照|照相|现在开始拍照|开始拍照|调用拍照|调用摄像头)[。.!！\s]*$/i.test(normalized);
+}
+
+function shouldSuppressDuplicatePhoto(body: LingzhuRequest, text: string): boolean {
+  const now = Date.now();
+  cleanupPhotoTransactions(now);
+
+  if (photoTransactionsByMessageId.has(body.message_id)) {
+    return true;
+  }
+
+  const ownerKey = buildPhotoOwnerKey(body);
+  const recent = recentPhotoTransactionsByOwner.get(ownerKey);
+  return Boolean(recent && recent.messageId !== body.message_id && isBarePhotoEcho(text));
+}
+
+function markPhotoRequested(body: LingzhuRequest, text: string): void {
+  const now = Date.now();
+  cleanupPhotoTransactions(now);
+  const ownerKey = buildPhotoOwnerKey(body);
+
+  photoTransactionsByMessageId.set(body.message_id, { ownerKey, createdAt: now });
+  recentPhotoTransactionsByOwner.set(ownerKey, {
+    messageId: body.message_id,
+    text: text.trim(),
+    createdAt: now,
+  });
+}
+
+function releasePhotoTransaction(body: LingzhuRequest): void {
+  const transaction = photoTransactionsByMessageId.get(body.message_id);
+  if (transaction) {
+    const recent = recentPhotoTransactionsByOwner.get(transaction.ownerKey);
+    if (recent?.messageId === body.message_id) {
+      recentPhotoTransactionsByOwner.delete(transaction.ownerKey);
+    }
+  }
+
+  photoTransactionsByMessageId.delete(body.message_id);
+  cleanupPhotoTransactions();
+}
+
+function readEnv(name: string): string {
+  try {
+    return globalThis.process?.env?.[name]?.trim() || "";
+  } catch {
+    return "";
+  }
+}
+
+function resolveGatewayToken(config: LingzhuConfig, api: any): string {
+  if (config.gatewayToken) {
+    return config.gatewayToken;
+  }
+
+  return readEnv("OPENCLAW_GATEWAY_TOKEN")
+    || readEnv("GATEWAY_TOKEN")
+    || api.config?.gateway?.auth?.token
+    || "";
 }
 
 function verifyAuth(
@@ -415,15 +701,80 @@ async function resolveTrustedFileUrl(fileUrl: string): Promise<string | null> {
   }
 }
 
+function guessImageMimeType(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === ".png") return "image/png";
+  if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
+  if (ext === ".gif") return "image/gif";
+  if (ext === ".webp") return "image/webp";
+  return "image/jpeg";
+}
+
+async function filePathToDataUrl(filePath: string, maxBytes: number): Promise<string | null> {
+  try {
+    const stat = await fs.stat(filePath);
+    if (!stat.isFile() || stat.size > maxBytes) {
+      return null;
+    }
+
+    const buffer = await fs.readFile(filePath);
+    if (buffer.length > maxBytes) {
+      return null;
+    }
+
+    return `data:${guessImageMimeType(filePath)};base64,${buffer.toString("base64")}`;
+  } catch {
+    return null;
+  }
+}
+
+async function normalizeImageUrlToDataUrl(
+  imageUrl: string,
+  logger: { info: (msg: string) => void; warn: (msg: string) => void },
+  maxImageBytes: number
+): Promise<string | null> {
+  if (imageUrl.startsWith("file://")) {
+    const localPath = await resolveTrustedFileUrl(imageUrl);
+    if (!localPath) {
+      logger.warn("[Lingzhu] Refused non-cache file URL image");
+      return null;
+    }
+    return filePathToDataUrl(localPath, maxImageBytes);
+  }
+
+  if (imageUrl.startsWith("data:")) {
+    const savedFileUrl = await saveDataUrlToFile(imageUrl, maxImageBytes);
+    if (!savedFileUrl) {
+      logger.warn("[Lingzhu] Failed to persist data URL image or image exceeds size limit");
+      return null;
+    }
+
+    const localPath = await resolveTrustedFileUrl(savedFileUrl);
+    logger.info(`[Lingzhu] Data URL image persisted to: ${savedFileUrl}`);
+    return localPath ? filePathToDataUrl(localPath, maxImageBytes) : imageUrl.replace(/\s+/g, "");
+  }
+
+  logger.info(`[Lingzhu] Downloading image for inline vision payload: ${imageUrl.substring(0, 80)}...`);
+  const fileUrl = await downloadImageToFile(imageUrl, maxImageBytes);
+  if (!fileUrl) {
+    logger.warn(`[Lingzhu] Image download failed or URL was rejected: ${imageUrl}`);
+    return null;
+  }
+
+  logger.info(`[Lingzhu] Image saved to: ${fileUrl}`);
+  const localPath = await resolveTrustedFileUrl(fileUrl);
+  return localPath ? filePathToDataUrl(localPath, maxImageBytes) : null;
+}
+
 async function preprocessOpenAIMessages(
   messages: Array<{
     role: "system" | "user" | "assistant";
-    content: string | Array<{ type: string; image_url?: { url: string }; text?: string }>;
+    content: OpenAIContent;
   }>,
   logger: { info: (msg: string) => void; warn: (msg: string) => void },
   maxImageBytes: number
-): Promise<Array<{ role: "system" | "user" | "assistant"; content: string }>> {
-  const result: Array<{ role: "system" | "user" | "assistant"; content: string }> = [];
+): Promise<Array<{ role: "system" | "user" | "assistant"; content: OpenAIContent }>> {
+  const result: Array<{ role: "system" | "user" | "assistant"; content: OpenAIContent }> = [];
 
   for (const msg of messages) {
     if (typeof msg.content === "string") {
@@ -436,57 +787,38 @@ async function preprocessOpenAIMessages(
       continue;
     }
 
-    const textParts: string[] = [];
-    const imagePaths: string[] = [];
+    const contentParts: OpenAIContentPart[] = [];
 
     for (const part of msg.content) {
       if (part.type === "text" && part.text) {
-        textParts.push(part.text);
+        contentParts.push({ type: "text", text: part.text });
       } else if (part.type === "image_url" && part.image_url?.url) {
-        const imagePartUrl = part.image_url.url;
-
-        if (imagePartUrl.startsWith("file://")) {
-          const localPath = await resolveTrustedFileUrl(imagePartUrl);
-          if (localPath) {
-            imagePaths.push(localPath);
-          } else {
-            logger.warn("[Lingzhu] 已拒绝非缓存目录 file URL");
-          }
-        } else if (imagePartUrl.startsWith("data:")) {
-          const fileUrl = await saveDataUrlToFile(imagePartUrl, maxImageBytes);
-          if (fileUrl) {
-            imagePaths.push(fileUrl.replace("file://", ""));
-            logger.info("[Lingzhu] data URL 图片已保存到本地缓存");
-          } else {
-            logger.warn("[Lingzhu] data URL 图片处理失败或超出大小限制");
-          }
-        } else {
-          logger.info(`[Lingzhu] 正在下载图片到本地: ${imagePartUrl.substring(0, 80)}...`);
-          const fileUrl = await downloadImageToFile(imagePartUrl, maxImageBytes);
-          if (fileUrl) {
-            imagePaths.push(fileUrl.replace("file://", ""));
-            logger.info(`[Lingzhu] 图片已保存到: ${fileUrl}`);
-          } else {
-            logger.warn(`[Lingzhu] 图片下载失败或地址被拒绝: ${imagePartUrl}`);
-          }
+        const dataUrl = await normalizeImageUrlToDataUrl(part.image_url.url, logger, maxImageBytes);
+        if (dataUrl) {
+          contentParts.push({ type: "image_url", image_url: { url: dataUrl } });
         }
       }
     }
 
-    let finalContent = textParts.join("\n");
-
-    if (imagePaths.length > 0) {
-      const imageRefs = imagePaths.map((imagePath) => `[图片: ${imagePath}]`).join("\n");
-      if (finalContent) {
-        finalContent = `${finalContent}\n\n${imageRefs}`;
-      } else {
-        finalContent = `读取这个图片\n\n${imageRefs},请根据执行的对话内容进行回答`;
-        logger.info("[Lingzhu] 为纯图片消息添加了占位文本");
+    if (contentParts.some((part) => part.type === "image_url")) {
+      if (!contentParts.some((part) => part.type === "text")) {
+        contentParts.unshift({
+          type: "text",
+          text: "请直接分析这张图片，并根据当前对话上下文回答用户问题。",
+        });
+        logger.info("[Lingzhu] Added placeholder text for image-only message");
       }
+      result.push({ role: msg.role, content: contentParts });
+      continue;
     }
 
-    if (finalContent) {
-      result.push({ role: msg.role, content: finalContent });
+    const textOnly = contentParts
+      .filter((part): part is { type: "text"; text: string } => part.type === "text")
+      .map((part) => part.text)
+      .join("\n")
+      .trim();
+    if (textOnly) {
+      result.push({ role: msg.role, content: textOnly });
     }
   }
 
@@ -524,6 +856,7 @@ export function createHttpHandler(api: any, getRuntimeState: () => LingzhuRuntim
               : ["take_photo", "take_navigation", "control_calendar", "notify_agent_off"],
           followUpEnabled: state.config.enableFollowUp !== false,
           sessionMode: state.config.sessionMode || "per_user",
+          visionPromptPreset: state.config.visionPromptPreset || "auto",
           debugLogging: state.config.debugLogging === true,
           experimentalNativeActions: state.config.enableExperimentalNativeActions === true,
           chatCompletionsEnabled: state.chatCompletionsEnabled === true,
@@ -604,7 +937,11 @@ export function createHttpHandler(api: any, getRuntimeState: () => LingzhuRuntim
     let nativeToolInvoked = false;
 
     try {
-      const body = (await readJsonBody(req)) as LingzhuRequest | undefined;
+      const maxRequestBytes = Math.min(
+        50 * 1024 * 1024,
+        Math.max(1024 * 1024, resolveMaxImageBytes(config) * 2 + 1024 * 1024)
+      );
+      const body = (await readJsonBody(req, maxRequestBytes)) as LingzhuRequest | undefined;
       if (!body || !body.message_id || !body.agent_id || !Array.isArray(body.message)) {
         res.statusCode = 400;
         res.setHeader("Content-Type", "application/json");
@@ -644,6 +981,78 @@ export function createHttpHandler(api: any, getRuntimeState: () => LingzhuRuntim
         }
       }, 7000);
 
+      const requestHasImage = hasIncomingImage(body.message);
+      const localIntentText = extractUserText(body.message);
+      const localToolCall = localIntentText
+        ? detectIntentFromText(localIntentText, {
+          defaultNavigationMode: config.defaultNavigationMode,
+          enableExperimentalNativeActions: config.enableExperimentalNativeActions,
+        }) || detectLocalPhotoIntent(localIntentText)
+        : null;
+
+      if (!requestHasImage && localToolCall && isLocalDeviceActionCommand(localToolCall.command)) {
+        logger.info(`[Lingzhu] 本地短路设备动作: ${localToolCall.command}, message_id=${body.message_id}`);
+        if (localToolCall.command === "take_photo") {
+          if (shouldSuppressDuplicatePhoto(body, localIntentText)) {
+            logger.warn(`[Lingzhu] 已忽略重复拍照触发: message_id=${body.message_id}`);
+            const finalFinishData: LingzhuSSEData = {
+              role: "agent",
+              type: "answer",
+              answer_stream: "",
+              message_id: body.message_id,
+              agent_id: body.agent_id,
+              is_finish: true,
+            };
+            writeDebugLog(
+              config,
+              buildRequestLogName(body.message_id, "response.duplicate_photo_done"),
+              summarizeForDebug(finalFinishData, includePayload)
+            );
+            safeWrite(formatLingzhuSSE("message", finalFinishData));
+            stopKeepalive();
+            res.end();
+            return true;
+          }
+
+          rememberPendingPhotoPrompt(body, localIntentText);
+          markPhotoRequested(body, localIntentText);
+        }
+
+        const toolData: LingzhuSSEData = {
+          role: "agent",
+          type: "tool_call",
+          message_id: body.message_id,
+          agent_id: body.agent_id,
+          is_finish: false,
+          tool_call: localToolCall,
+        };
+        writeDebugLog(
+          config,
+          buildRequestLogName(body.message_id, "response.local_tool_call"),
+          summarizeForDebug(toolData, includePayload)
+        );
+        safeWrite(formatLingzhuSSE("message", toolData));
+
+        const finalFinishData: LingzhuSSEData = {
+          role: "agent",
+          type: "answer",
+          answer_stream: "",
+          message_id: body.message_id,
+          agent_id: body.agent_id,
+          is_finish: true,
+        };
+        writeDebugLog(
+          config,
+          buildRequestLogName(body.message_id, "response.local_tool_done"),
+          summarizeForDebug(finalFinishData, includePayload)
+        );
+        safeWrite(formatLingzhuSSE("message", finalFinishData));
+        stopKeepalive();
+        res.end();
+        logger.info(`[Lingzhu] 本地设备动作已完成: message_id=${body.message_id}`);
+        return true;
+      }
+
       const includeMetadata = config.includeMetadata !== false;
       const maxImageBytes = resolveMaxImageBytes(config);
       void cleanupImageCacheIfNeeded().catch((error) => {
@@ -651,13 +1060,23 @@ export function createHttpHandler(api: any, getRuntimeState: () => LingzhuRuntim
       });
 
       const context = includeMetadata ? normalizeContext(body.metadata) : undefined;
-      let openaiMessages = lingzhuToOpenAI(body.message, context, {
+      let openaiMessages: Array<{ role: "system" | "user" | "assistant"; content: OpenAIContent }> = lingzhuToOpenAI(body.message, context, {
         systemPrompt: config.systemPrompt,
         defaultNavigationMode: config.defaultNavigationMode,
         enableExperimentalNativeActions: config.enableExperimentalNativeActions,
-      });
+      }) as any;
 
-      openaiMessages = await preprocessOpenAIMessages(openaiMessages as any, logger, maxImageBytes);
+      openaiMessages = await preprocessOpenAIMessages(openaiMessages, logger, maxImageBytes);
+      if (requestHasImage) {
+        const visionOriginalText = extractFallbackUserText(body.message) || consumePendingPhotoPrompt(body);
+        releasePhotoTransaction(body);
+        const visionPreset = detectVisionPromptPreset(visionOriginalText, config);
+        openaiMessages.unshift({
+          role: "system",
+          content: buildVisionSystemPrompt(visionPreset, visionOriginalText),
+        });
+        logger.info(`[Lingzhu] Fast vision channel enabled: preset=${visionPreset}`);
+      }
       const hasUserMsg = openaiMessages.some((message) => message.role === "user");
       if (!hasUserMsg) {
         const fallbackText = extractFallbackUserText(body.message) || "你好";
@@ -669,14 +1088,19 @@ export function createHttpHandler(api: any, getRuntimeState: () => LingzhuRuntim
         `[Lingzhu] includeMetadata=${includeMetadata}, openaiMessages=${openaiMessages.length}, maxImageBytes=${maxImageBytes}`
       );
 
-      const sessionKey = buildSessionKey(config, body);
+      const sessionKey = requestHasImage ? buildVisionSessionKey(config, body) : buildSessionKey(config, body);
       const targetAgentId = config.agentId || body.agent_id || "main";
       const gatewayPort = api.config?.gateway?.port ?? state.gatewayPort ?? 18789;
-      const gatewayToken = api.config?.gateway?.auth?.token;
+      const gatewayToken = resolveGatewayToken(config, api);
 
       nativeToolListener = (eventData: any) => {
         logger.info(`[Lingzhu:NativeEvent] Received native_invoke event: ${JSON.stringify(eventData)}`);
         logger.info(`[Lingzhu:NativeEvent] Current sessionKey=${sessionKey}, targetAgentId=${targetAgentId}`);
+
+        if (requestHasImage) {
+          logger.warn("[Lingzhu:NativeEvent] 当前请求已包含图片，快速视觉通道已忽略原生工具调用");
+          return;
+        }
 
         if (eventData.sessionKey && eventData.sessionKey !== sessionKey) {
           logger.warn(`[Lingzhu:NativeEvent] Filtered out! Event sessionKey (${eventData.sessionKey}) != current (${sessionKey})`);
@@ -830,6 +1254,12 @@ export function createHttpHandler(api: any, getRuntimeState: () => LingzhuRuntim
 
               if (delta?.content) {
                 fullResponse += delta.content;
+
+                if (nativeToolInvoked) {
+                  logger.info("[Lingzhu] 已触发原生设备工具，跳过后续普通文本流");
+                  continue;
+                }
+
                 streamedAnswer = true;
                 const answerChunkData: LingzhuSSEData = {
                   role: "agent",
@@ -891,7 +1321,7 @@ export function createHttpHandler(api: any, getRuntimeState: () => LingzhuRuntim
         }
       }
 
-      if (!hasToolCall && fullResponse) {
+      if (!requestHasImage && !hasToolCall && fullResponse) {
         const detectedIntent = detectIntentFromText(fullResponse, {
           defaultNavigationMode: config.defaultNavigationMode,
           enableExperimentalNativeActions: config.enableExperimentalNativeActions,
